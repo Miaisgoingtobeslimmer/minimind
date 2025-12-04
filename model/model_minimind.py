@@ -54,12 +54,13 @@ class MiniMindConfig(PretrainedConfig): #继承自 Hugging Face PretrainedConfig
         self.rms_norm_eps = rms_norm_eps
         self.rope_theta = rope_theta
         self.inference_rope_scaling = inference_rope_scaling
-        # 外推长度 = factor * original_max_position_embeddings
+        # 外推长度 = factor * original_max_position_embeddings = 32768
         self.rope_scaling = {
-            "beta_fast": 4,
+            "beta_fast": 32,
             "beta_slow": 1,
-            "factor": 4,
+            "factor": 16,
             "original_max_position_embeddings": 2048,
+            "attention_factor": 1.0,
             "type": "yarn"
         } if self.inference_rope_scaling else None
         self.flash_attn = flash_attn
@@ -96,6 +97,7 @@ class RMSNorm(torch.nn.Module):  #继承torch.nn.Module 所有的模型（无论
     def __init__(self, dim: int, eps: float = 1e-5):  #初始化     eps是防止除零
         super().__init__()   # 调用 nn.Module 的初始化函数
         self.eps = eps
+
         self.weight = nn.Parameter(torch.ones(dim))  #nn.Parameter 让这个张量成为模型训练的一部分 ones全1向量
 
     def _norm(self, x): 
@@ -112,7 +114,7 @@ class RMSNorm(torch.nn.Module):  #继承torch.nn.Module 所有的模型（无论
 
 #不是网络中的一层 所以不需要用类
 #预计算 RoPE 所需的 cos/sin 旋转矩阵（包含 YaRN 长度扩展）
-def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float = 1e6, #end表示序列长
+def precompute_freqs_cis_old(dim: int, end: int = int(32 * 1024), rope_base: float = 1e6, #end表示序列长
                          rope_scaling: Optional[dict] = None):   # Optional[int] 表示的是rope_scaling的类型 可以接受 dict字典 或 None
     
     #计算频率 torch.arange(0, dim, 2) 产生一个从 0 到 dim-1 的 偶数索引序列（步长为 2）
@@ -151,6 +153,29 @@ def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float =
     # 下面是标准llama做法 相邻的dim一组
     # freqs_cos = torch.cos(freqs).repeat_interleave(2,dim=-1) # 【seq_len,dim】
     # freqs_sin = torch.sin(freqs).repeat_interleave(2,dim=-1) # 【seq_len,dim】
+    return freqs_cos, freqs_sin
+
+
+def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float = 1e6,
+                         rope_scaling: Optional[dict] = None):
+    freqs, attn_factor = 1.0 / (rope_base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)), 1.0
+    if rope_scaling is not None:
+        orig_max, factor, beta_fast, beta_slow, attn_factor = (
+            rope_scaling.get("original_max_position_embeddings", 2048), rope_scaling.get("factor", 16),
+            rope_scaling.get("beta_fast", 32.0), rope_scaling.get("beta_slow", 1.0), rope_scaling.get("attention_factor", 1.0)
+        )
+        if end / orig_max > 1.0:
+            # YaRN: f'(i) = f(i)((1-γ) + γ/s), where γ∈[0,1] is linear ramp
+            inv_dim = lambda b: (dim * math.log(orig_max / (b * 2 * math.pi))) / (2 * math.log(rope_base))
+            low, high = max(math.floor(inv_dim(beta_fast)), 0), min(math.ceil(inv_dim(beta_slow)), dim // 2 - 1)
+            ramp = torch.clamp((torch.arange(dim // 2, device=freqs.device).float() - low) / max(high - low, 0.001), 0, 1)
+            freqs = freqs * (1 - ramp + ramp / factor)
+
+    t = torch.arange(end, device=freqs.device)
+    freqs = torch.outer(t, freqs).float()
+    freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
+    freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1) * attn_factor
+
     return freqs_cos, freqs_sin
 
 
@@ -245,17 +270,9 @@ class Attention(nn.Module):
         # attention_mask is None or torch.all(attention_mask == 1) 在pytorch里面有效token是1 （表示没有 padding） 
         # Flash Attention 不支持复杂 padding mask
         if self.flash and seq_len > 1 and (attention_mask is None or torch.all(attention_mask == 1)):
-            # 构造能传给函数的 padding mask
-            attn_mask = (
-                None  #当attention_mask是None attn_mask也是none
-                if attention_mask is None
-                else attention_mask.view(bsz, 1, 1, -1).expand(bsz, self.n_local_heads, seq_len, -1).bool()
-                # 当attention_mask == 1 时候 把shape[bsz,seq]变成[bsz,1,1,seq] 再复制数据[bsz,head,seq,seq] 转为布尔型
-            )
-
             # 调用函数进行falsh计算 dropout_p=self.dropout if self.training else 0.0 推理的时候不能用dropout self.training是torch.nn.Module的属性
-            output = F.scaled_dot_product_attention(xq, xk, xv, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
-        else:  
+            output = F.scaled_dot_product_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+        else:
             # 自己实现
             # [bsz,n_local_head,seq_len,seq_len]
             scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim) # @是在两个张量的相应位置的最后两维上进行矩阵相乘 sqrt开方
