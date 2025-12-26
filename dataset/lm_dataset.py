@@ -10,45 +10,55 @@ from sklearn.model_selection import train_test_split
 import os
 import ast
 
+# HuggingFace 的 tokenizers 库默认会并行处理分词  我们设置让 Tokenizer 变成单线程执行，这样更安全、更稳定。
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-
-class PretrainDataset(Dataset):
-    def __init__(self, data_path, tokenizer, max_length=512):
+# 数据文件采用 JSON Lines (JSONL) 格式
+class PretrainDataset(Dataset): #继承Dataset
+    def __init__(self, data_path, tokenizer, max_length=512): #max_length表示最大序列长度
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.samples = self.load_data(data_path)
+        self.samples = self.load_data(data_path) # 在初始化时一次性将所有样本加载到内存中的 self.samples 列表中
 
     def load_data(self, path):
         samples = []
-        with open(path, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
-                data = json.loads(line.strip())
+        # 使用 with 语句打开位于 path 的文件。'r' 表示只读模式，encoding='utf-8' 指定字符编码。
+        with open(path, 'r', encoding='utf-8') as f:  
+            for line_num, line in enumerate(f, 1):  # enumerate(f, 1) f 是文件对象  对可迭代对象 f 从下标 1 开始编号
+                data = json.loads(line.strip())  #line.strip() 去掉首尾空白/换行  json.loads() 把 JSON 字符串解析成 Python dict
                 samples.append(data)
         return samples
 
-    def __len__(self):
+    def __len__(self): #返回样本总数
         return len(self.samples)
 
-    def __getitem__(self, index):
+    # 根据 index 取出某个样本并把它加工成训练需要的张量
+    def __getitem__(self, index):  
         sample = self.samples[index]
 
-        # 构建输入文本
+        # 构建输入文本 对某个样本进行分词
         encoding = self.tokenizer(
-            str(sample['text']),
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
+            str(sample['text']),  # 从某个样本的字典中取出'text' 字段，只要这个字段进行训练 再强转为字符串
+            max_length=self.max_length,  # 限定最大序列长度
+            padding='max_length',  # 对序列进行 padding 到 max_length 长度
+            truncation=True,  # 如果文本太长，截断到 max_length
+            return_tensors='pt'  # 让 tokenizer 返回 PyTorch 张量
+        ) # encoding的类型： HuggingFace Tokenizer 的返回值是一个字典 字典对应的value是张量
+        
+        # encoding.input_ids 取出字典里面的input_ids字段 这才是我们要的分词后的tokenID  shape(1, max_length)
+        # squeeze() 会删除1这个维度 变成(max_length)
         input_ids = encoding.input_ids.squeeze()
-        loss_mask = (input_ids != self.tokenizer.pad_token_id)
+        # 一个布尔型的张量 shape[max_length]
+        # False表示是padding True表示是真实token
+        loss_mask = (input_ids != self.tokenizer.pad_token_id) 
 
-        X = torch.tensor(input_ids[:-1], dtype=torch.long)
-        Y = torch.tensor(input_ids[1:], dtype=torch.long)
-        loss_mask = torch.tensor(loss_mask[1:], dtype=torch.long)
-        return X, Y, loss_mask
+        # 自回归 Y是tag
+        X = torch.tensor(input_ids[:-1], dtype=torch.long)  #掉最后一个 token 类型是64 位整数 CrossEntropyLoss 要求输入 target 为 long/int 类型
+        Y = torch.tensor(input_ids[1:], dtype=torch.long)   #去掉第一个 token
+        # 避免 padding 位置计算 loss
+        loss_mask = torch.tensor(loss_mask[1:], dtype=torch.long) #去掉第一个 token，和 Y 对齐 类型也是64位整数 1代表真实token
+        return X, Y, loss_mask #shape都是[max_length-1]
 
 
 class SFTDataset(Dataset):
