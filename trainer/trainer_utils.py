@@ -11,7 +11,7 @@ import torch.distributed as dist
 from torch.utils.data import Sampler
 from transformers import AutoTokenizer
 from model.model_minimind import MiniMindForCausalLM
-
+# test pr
 
 def is_main_process():
     return not dist.is_initialized() or dist.get_rank() == 0
