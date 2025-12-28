@@ -34,7 +34,7 @@ class MiniMindConfig(PretrainedConfig): #继承自 Hugging Face PretrainedConfig
             n_routed_experts: int = 4,
             n_shared_experts: int = 1,
             scoring_func: str = 'softmax',
-            aux_loss_alpha: float = 0.1,
+            aux_loss_alpha: float = 0.01,
             seq_aux: bool = True,
             norm_topk_prob: bool = True,
             **kwargs
@@ -440,6 +440,7 @@ class MOEFeedForward(nn.Module):
         flat_topk_idx = topk_idx.view(-1) #[bsz*seq_len*top_k]
         # 训练时
         if self.training:
+<<<<<<< HEAD
             # 把每个 token 复制 top-k 次，以便送给它要路由的 top-k 个专家
             x = x.repeat_interleave(self.config.num_experts_per_tok, dim=0) #在第一维度token维度 复制top_k次 [bsz*seq_len*top_k, hiddensize]
             # 创建未初始化的y，用来存放每个 token 通过专家计算得到的输出 形状和x一样
@@ -447,6 +448,10 @@ class MOEFeedForward(nn.Module):
             # flat_topk_idx == i 布尔高级索引 变为一个有true false 矩阵
             # x[flat_topk_idx == i] 筛选并提取所有被路由到专家i的 Token 副本 并送入expert进行前向传播
             # y[flat_topk_idx == i] 将专家计算的输出，通过相同的布尔掩码，精确地写回输出y中对应的位置
+=======
+            x = x.repeat_interleave(self.config.num_experts_per_tok, dim=0)
+            y = torch.empty_like(x, dtype=x.dtype)
+>>>>>>> upstream/master
             for i, expert in enumerate(self.experts):
                 y[flat_topk_idx == i] = expert(x[flat_topk_idx == i]).to(y.dtype)  # 确保类型一致 [bsz*seq_len*top_k, hiddensize]
             # y.view(*topk_weight.shape, -1) [bsz*seq_len, top_k, hidden_size] 星号将元组 (T, k) 解包成两个独立的参数

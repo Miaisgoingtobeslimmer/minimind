@@ -21,7 +21,7 @@ def Logger(content):
         print(content)
 
 def get_lr(current_step, total_steps, lr):
-    return lr / 10 + 0.5 * lr * (1 + math.cos(math.pi * current_step / total_steps))
+    return lr*(0.1 + 0.45*(1 + math.cos(math.pi * current_step / total_steps)))
 
 # 初始化 PyTorch 的分布式数据并行（DDP）：每张 GPU 拿到不同的小批次数据，计算梯度后进行同步
 def init_distributed_mode():

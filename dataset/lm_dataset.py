@@ -1,14 +1,9 @@
 import json
-import random
-import re
-
 import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 import torch
-from sklearn.model_selection import train_test_split
 import os
-import ast
 
 # HuggingFace 的 tokenizers 库默认会并行处理分词  我们设置让 Tokenizer 变成单线程执行，这样更安全、更稳定。
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
